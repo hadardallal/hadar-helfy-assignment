@@ -1,0 +1,91 @@
+<body>
+
+    <h2>Login</h2>
+  
+    <form id="loginForm">
+      <label>Username:</label><br/>
+      <input id="username" name="username" /><br/><br/>
+  
+      <label>Password:</label><br/>
+      <input type="password" id="password" name="password" /><br/><br/>
+  
+      <button type="submit">Login</button>
+    </form>
+  
+    <p id="result"></p>
+  
+    <hr/>
+  
+    <h3>Profile</h3>
+    <button id="meButton">Get /me</button>
+    <pre id="meResult"></pre>
+  
+    <script>
+      const resultEl = document.getElementById("result");
+      const meResultEl = document.getElementById("meResult");
+  
+      const form = document.getElementById("loginForm");
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+  
+        const username = document.getElementById("username").value;
+        const password = document.getElementById("password").value;
+  
+        resultEl.innerText = "Logging in...";
+  
+        try {
+          const res = await fetch("/login", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ username, password })
+          });
+  
+          const data = await res.json();
+  
+          if (!res.ok) {
+            resultEl.innerText = data.error || "Login failed";
+            return;
+          }
+  
+          // Store token in sessionStorage (not shown to user)
+          if (data.token) {
+            sessionStorage.setItem("authToken", data.token);
+          }
+  
+          resultEl.innerText = data.message || "Login successful";
+        } catch (err) {
+          resultEl.innerText = "Error: " + err.message;
+        }
+      });
+  
+      // Button to call /me using the stored token
+      const meButton = document.getElementById("meButton");
+      meButton.addEventListener("click", async () => {
+        meResultEl.innerText = "Calling /me...";
+  
+        const token = sessionStorage.getItem("authToken");
+        if (!token) {
+          meResultEl.innerText = "No token found. Please login first.";
+          return;
+        }
+  
+        try {
+          const res = await fetch("/me", {
+            method: "GET",
+            headers: {
+              "Authorization": "Bearer " + token
+            }
+          });
+  
+          const data = await res.json();
+          meResultEl.innerText = JSON.stringify(data, null, 2);
+        } catch (err) {
+          meResultEl.innerText = "Error: " + err.message;
+        }
+      });
+    </script>
+  
+  </body>
+  

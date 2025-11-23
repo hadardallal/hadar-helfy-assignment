@@ -1,0 +1,204 @@
+services:
+  tidb:
+    image: pingcap/tidb:latest
+    container_name: tidb
+    command:
+      - --store=unistore
+      - --path=""
+    ports:
+      - "4000:4000"
+      - "10080:10080"
+      - "2379:2379"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:10080/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+  db-init:
+    image: mysql:8
+    container_name: db-init
+    depends_on:
+      - tidb
+    volumes:
+      - ./db-fold/init.sql:/init.sql
+    entrypoint: >
+      sh -c "
+      echo 'Waiting for TiDB...' &&
+      sleep 20 &&
+      mysql -h tidb -P 4000 -u root < /init.sql &&
+      echo 'DB init done';
+      "
+    restart: "no"
+    networks:
+      - backend
+
+  api:
+    build: ./api-fold
+    container_name: api
+    depends_on:
+      - tidb
+      - db-init
+    ports:
+      - "3000:3000"
+    environment:
+      DB_HOST: tidb
+      DB_PORT: 4000
+      DB_USER: root
+      DB_PASSWORD: ""
+      DB_NAME: appdb
+      PORT: 3000
+      KAFKA_BROKER: kafka:9092
+      KAFKA_TOPIC: db-changes
+    networks:
+      - backend
+
+  kafka:
+    image: confluentinc/cp-kafka:7.8.3
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_KRAFT_MODE: "true"
+
+      CLUSTER_ID: "1L6g7nGhU-eAKfL--X25wo"
+      KAFKA_NODE_ID: 1
+
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - backend
+
+  cdc-consumer:
+    build: ./consumer
+    container_name: cdc-consumer
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BROKER: "kafka:9092"
+      KAFKA_TOPIC: "db-changes"
+      CONSUMER_GROUP_ID: "cdc-consumer-group"
+      METRICS_PORT: "9100"
+      LOG_LEVEL: "INFO"
+    ports:
+      - "9100:9100"
+    networks:
+      - backend
+
+  # ticdc:
+  #   image: pingcap/ticdc:v8.5.0
+  #   container_name: ticdc
+  #   command:
+  #     - /cdc
+  #     - server
+  #     - --addr=127.0.0.1:8300
+  #     - --pd=http://tidb:2379
+  #   depends_on:
+  #     - tidb
+  #   ports:
+  #     - "8300:8300"
+  #   networks:
+  #     - backend
+
+  # ticdc-changefeed:
+  #   image: pingcap/ticdc:v8.5.0
+  #   container_name: ticdc-changefeed
+  #   depends_on:
+  #     - ticdc
+  #     - kafka
+  #   entrypoint: ["/bin/sh", "-c"]
+  #   command: >
+  #     "
+  #     echo 'Waiting for TiCDC server...';
+  #     sleep 10;
+  #     echo 'Creating TiCDC changefeed to Kafka...';
+  #     /cdc cli changefeed create
+  #       --server=http://ticdc:8300
+  #       --changefeed-id=db-to-kafka
+  #       --sink-uri='kafka://kafka:9092/db-changes?protocol=canal-json&kafka-version=2.4.0&partition-num=1&replication-factor=1&max-message-bytes=67108864' ||
+  #     echo 'Changefeed may already exist, continuing...';
+  #     sleep 5;
+  #     "
+  #   restart: "no"
+  #   networks:
+  #     - backend
+
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    container_name: prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    ports:
+      - "9091:9090"
+    depends_on:
+      - api
+      - cdc-consumer
+    networks:
+      - backend
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: loki
+    command: [ "-config.file=/etc/loki/local-config.yml" ]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./observability/loki-config.yml:/etc/loki/local-config.yml:ro
+      - loki_data:/loki
+    restart: unless-stopped
+    networks:
+      - backend
+
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: promtail
+    command: [ "-config.file=/etc/promtail/config.yml" ]
+    volumes:
+      - ./observability/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+    networks:
+      - backend
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - backend
+
+volumes:
+  kafka_data:
+  grafana_data:
+  loki_data:
+
+networks:
+  backend:
