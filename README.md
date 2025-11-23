@@ -118,7 +118,7 @@ You should see the CDC JSON event.
 
 Open Prometheus:
 
-👉 http://localhost:9091
+http://localhost:9091
 
 PromQL examples:
 
